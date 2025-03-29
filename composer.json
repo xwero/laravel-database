@@ -47,5 +47,23 @@
     "config": {
         "sort-packages": true
     },
-    "minimum-stability": "dev"
+    "minimum-stability": "dev",
+    "require-dev": {
+        "fakerphp/faker": "2.0.x-dev",
+        "illuminate/console": "^13.0@dev",
+        "illuminate/events": "^13.0@dev",
+        "illuminate/filesystem": "^13.0@dev",
+        "illuminate/pagination": "^13.0@dev",
+        "illuminate/testing": "^13.0@dev",
+        "mockery/mockery": "2.0.x-dev",
+        "phpunit/phpunit": "^12.1@dev"
+    },
+    "autoload-dev": {
+        "files": [
+            "tests/Database/stubs/MigrationCreatorFakeMigration.php"
+        ],
+        "psr-4": {
+            "Illuminate\\Tests\\": "tests/"
+        }
+    }
 }
