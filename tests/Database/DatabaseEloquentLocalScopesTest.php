@@ -3,6 +3,7 @@
 namespace Illuminate\Tests\Database;
 
 use Illuminate\Database\Capsule\Manager as DB;
+use Illuminate\Database\Eloquent\Attributes\Scope;
 use Illuminate\Database\Eloquent\Model;
 use PHPUnit\Framework\TestCase;
 
@@ -32,12 +33,24 @@ class DatabaseEloquentLocalScopesTest extends TestCase
         $this->assertTrue($model->hasNamedScope('active'));
         $this->assertTrue($model->hasNamedScope('type'));
 
+        $model2 = new EloquentLocalScopedMethodTestModel;
+        $this->assertTrue($model->hasNamedScope('active'));
+
         $this->assertFalse($model->hasNamedScope('nonExistentLocalScope'));
     }
 
     public function testLocalScopeIsApplied()
     {
         $model = new EloquentLocalScopesTestModel;
+        $query = $model->newQuery()->active();
+
+        $this->assertSame('select * from "table" where "active" = ?', $query->toSql());
+        $this->assertEquals([true], $query->getBindings());
+    }
+
+    public function testLocalScopeAttributeIsApplied()
+    {
+        $model = new EloquentLocalScopedMethodTestModel;
         $query = $model->newQuery()->active();
 
         $this->assertSame('select * from "table" where "active" = ?', $query->toSql());
@@ -101,5 +114,16 @@ class EloquentLocalScopesTestModel extends Model
     public function scopeType($query, $type)
     {
         $query->where('type', $type);
+    }
+}
+
+class EloquentLocalScopedMethodTestModel extends Model
+{
+    protected $table = 'table';
+
+    #[Scope]
+    public function active($query)
+    {
+        $query->where('active', true);
     }
 }

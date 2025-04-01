@@ -136,6 +136,8 @@ class Builder implements BuilderContract
         'torawsql',
     ];
 
+    protected array $extensions = [];
+
     /**
      * Applied global scopes.
      *
@@ -201,6 +203,11 @@ class Builder implements BuilderContract
         }
 
         return $this;
+    }
+
+    public function addBuilderExtension($extension, $extensionType)
+    {
+        $this->extensions[$extension] = $extensionType;
     }
 
     /**
@@ -1378,9 +1385,10 @@ class Builder implements BuilderContract
     /**
      * Delete records from the database.
      *
+     * @param null $id
      * @return mixed
      */
-    public function delete()
+    public function delete($id = null)
     {
         if (isset($this->onDelete)) {
             return call_user_func($this->onDelete, $this);
@@ -1423,6 +1431,26 @@ class Builder implements BuilderContract
         return $this->model && $this->model->hasNamedScope($scope);
     }
 
+    public function hasLocalBuilderExtension($builderExtension) : bool
+    {
+        return $this->model && $this->model->hasLocalBuilderExtension($builderExtension);
+    }
+
+    public function hasRegularBuilderExtension($builderExtension) : bool
+    {
+        $regularBuilderExtensions = array_filter($this->extensions, function ($extensionType, $extension){
+            return $extensionType == BuilderExtensionType::REGULAR;
+        }, ARRAY_FILTER_USE_BOTH);
+
+        foreach ($regularBuilderExtensions as $extension => $extensionType) {
+            if(str_contains(strtolower($extension), strtolower($builderExtension))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /**
      * Call the given local model scopes.
      *
@@ -1459,11 +1487,21 @@ class Builder implements BuilderContract
      */
     public function applyScopes()
     {
-        if (! $this->scopes) {
-            return $this;
+        $builder = clone $this;
+
+        $requiredBuilderExtensions = array_filter($this->extensions, function($extensionType, $extension) {
+            return $extensionType == BuilderExtensionType::REQUIRED;
+        }, ARRAY_FILTER_USE_BOTH);
+
+        if(count($requiredBuilderExtensions) > 0) {
+            foreach ($requiredBuilderExtensions as $extension => $extensionType) {
+                new $extension()->apply($builder);
+            }
         }
 
-        $builder = clone $this;
+        if (! $this->scopes) {
+            return $builder;
+        }
 
         foreach ($this->scopes as $identifier => $scope) {
             if (! isset($builder->scopes[$identifier])) {
@@ -1531,6 +1569,31 @@ class Builder implements BuilderContract
         return $this->callScope(function (...$parameters) use ($scope) {
             return $this->model->callNamedScope($scope, $parameters);
         }, $parameters);
+    }
+
+    protected function callLocalBuilderExtension($builderExtension, array $parameters = []) : Builder
+    {
+        $this->model->$builderExtension($this, $parameters);
+
+        return $this;
+    }
+
+    protected function callRegularBuilderExtension($builderExtension, array $parameters = []) : Builder
+    {
+        $regularBuilderExtensions = array_filter($this->extensions, function ($extensionType, $extension) use($builderExtension) {
+            return $extensionType == BuilderExtensionType::REGULAR &&
+                str_contains(strtolower($extension), strtolower($builderExtension));
+        }, ARRAY_FILTER_USE_BOTH);
+
+        if(count($regularBuilderExtensions) == 0) {
+            throw new \LogicException('callRegularBuilderExtension method called without extension exist chack.');
+        }
+
+        $extension = array_key_first($regularBuilderExtensions);
+
+        new $extension()->apply($this);
+
+        return $this;
     }
 
     /**
@@ -2133,6 +2196,14 @@ class Builder implements BuilderContract
             }
 
             return $callable(...$parameters);
+        }
+
+        if($this->hasLocalBuilderExtension($method)) {
+            return $this->callLocalBuilderExtension($method, $parameters);
+        }
+
+        if($this->hasRegularBuilderExtension($method)) {
+            return $this->callRegularBuilderExtension($method, $parameters);
         }
 
         if ($this->hasNamedScope($method)) {

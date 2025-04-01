@@ -11,6 +11,7 @@ use Illuminate\Contracts\Support\Arrayable;
 use Illuminate\Contracts\Support\CanBeEscapedWhenCastToString;
 use Illuminate\Contracts\Support\Jsonable;
 use Illuminate\Database\ConnectionResolverInterface as Resolver;
+use Illuminate\Database\Eloquent\Attributes\BuilderExtension;
 use Illuminate\Database\Eloquent\Attributes\Scope as LocalScope;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
@@ -25,6 +26,7 @@ use Illuminate\Support\Traits\ForwardsCalls;
 use JsonException;
 use JsonSerializable;
 use LogicException;
+use ReflectionClass;
 use ReflectionMethod;
 use Stringable;
 
@@ -161,6 +163,8 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      * @var array
      */
     protected static $globalScopes = [];
+
+    protected static array $builderExtensions = [];
 
     /**
      * The list of models classes that should not be affected with touch.
@@ -300,6 +304,68 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     protected static function boot()
     {
         static::bootTraits();
+        static::bootBuilderExtensions();
+    }
+
+    protected static function bootBuilderExtensions()
+    {
+        static::$builderExtensions = [];
+        $reflectionClass = new ReflectionClass(static::class);
+
+        $classBuilderExtensions = $reflectionClass->getAttributes(BuilderExtension::class);
+
+        foreach ($classBuilderExtensions as $classBuilderExtension) {
+            $arguments = $classBuilderExtension->getArguments();
+            $argumentsCount = count($arguments);
+
+            if($argumentsCount == 0){
+                throw new LogicException('Builder Extension must have at least one argument');
+            }
+
+            if($argumentsCount > 2) {
+                throw new LogicException('Builder Extension has maximun two arguments');
+            }
+
+            if($argumentsCount == 1){
+                $argument = $arguments[0];
+
+                if(is_string($argument)){
+                    static::$builderExtensions[$argument] = BuilderExtensionType::REGULAR;
+                } elseif(is_array($argument)){
+                    if(is_string(array_key_first($argument))){
+                        foreach($argument as $extension => $extensionType){
+                            static::$builderExtensions[$extension] = $extensionType;
+                        }
+                    } else {
+                        foreach($argument as $extension){
+                            static::$builderExtensions[$extension] = BuilderExtensionType::REGULAR;
+                        }
+                    }
+                }
+            }
+
+            if($argumentsCount == 2){
+                static::$builderExtensions[$arguments[0]] = $arguments[1];
+            }
+        }
+
+        $methods = $reflectionClass->getMethods(\ReflectionMethod::IS_PUBLIC);
+
+        foreach ($methods as $method) {
+            $attributes = $method->getAttributes(BuilderExtension::class);
+
+            if(count($attributes) > 1){
+                throw new LogicException('a method can have only one BuilderExtension attribute');
+            }
+
+            if(count($attributes) == 1 && count($attributes[0]->getArguments()) > 0){
+                throw new LogicException('a method BuilderExtension attribute as no arguments');
+            }
+
+            if(count($attributes) == 1) {
+                static::$builderExtensions[$method->getName()] = BuilderExtensionType::LOCALE;
+            }
+        }
     }
 
     /**
@@ -366,6 +432,8 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
         static::$booted = [];
 
         static::$globalScopes = [];
+
+        static::$builderExtensions = [];
     }
 
     /**
@@ -1522,7 +1590,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     public function newQuery()
     {
-        return $this->registerGlobalScopes($this->newQueryWithoutScopes());
+        return $this->registerBuilderExtensions($this->registerGlobalScopes($this->newQueryWithoutScopes()));
     }
 
     /**
@@ -1544,7 +1612,7 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     public function newQueryWithoutRelationships()
     {
-        return $this->registerGlobalScopes($this->newModelQuery());
+        return $this->registerBuilderExtensions($this->registerGlobalScopes($this->newModelQuery()));
     }
 
     /**
@@ -1557,6 +1625,19 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
     {
         foreach ($this->getGlobalScopes() as $identifier => $scope) {
             $builder->withGlobalScope($identifier, $scope);
+        }
+
+        return $builder;
+    }
+
+    public function registerBuilderExtensions(Builder $builder)
+    {
+        $builderExtensions = array_filter(static::$builderExtensions, function($builderExtensionType, $builderExtension) {
+            return in_array($builderExtensionType, [BuilderExtensionType::REGULAR, BuilderExtensionType::REQUIRED]);
+        }, ARRAY_FILTER_USE_BOTH);
+
+        foreach ($builderExtensions as $builderExtension => $builderExtensionType) {
+            $builder->addBuilderExtension($builderExtension, $builderExtensionType);
         }
 
         return $builder;
@@ -1633,6 +1714,11 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
             : Pivot::fromAttributes($parent, $attributes, $table, $exists);
     }
 
+    public Function hasBuilderExtension($name) : bool
+    {
+        return isset(static::$builderExtensions[$name]);
+    }
+
     /**
      * Determine if the model has a given scope.
      *
@@ -1645,6 +1731,11 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
             static::isScopeMethodWithAttribute($scope);
     }
 
+    public function hasLocalBuilderExtension($name) : bool
+    {
+        return isset(static::$builderExtensions[$name]) && static::$builderExtensions[$name] == BuilderExtensionType::LOCALE;
+    }
+
     /**
      * Apply the given named scope if possible.
      *
@@ -1654,7 +1745,11 @@ abstract class Model implements Arrayable, ArrayAccess, CanBeEscapedWhenCastToSt
      */
     public function callNamedScope($scope, array $parameters = [])
     {
-        if ($this->isScopeMethodWithAttribute($scope)) {
+        $localBuilderExtensions = array_filter(static::$builderExtensions, function($builderExtensionType, $builderExtension) {
+            return $builderExtensionType === BuilderExtensionType::LOCALE;
+        }, ARRAY_FILTER_USE_BOTH);
+
+        if ($this->isScopeMethodWithAttribute($scope) || in_array($scope, array_keys($localBuilderExtensions))) {
             return $this->{$scope}(...$parameters);
         }
 
